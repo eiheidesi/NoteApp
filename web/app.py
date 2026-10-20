@@ -15,6 +15,7 @@ import subprocess
 
 import psycopg2
 import psycopg2.extras
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from flask import (
     Flask, request, session, redirect, url_for,
     render_template, Response, jsonify, abort,
@@ -28,6 +29,19 @@ DB_USER = os.environ.get("DB_USER", "notesapp")
 DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "notesapp_pg_pw_2024")
 JWT_SECRET = os.environ.get("JWT_SECRET", "s3cr3t")
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-session-key")
+
+# Class 3 HW: AES-GCM key (256-bit / 32 bytes) from environment
+_RAW_COMMENT_KEY = os.environ.get(
+    "COMMENT_KEY",
+    os.environ.get(
+        "AES_KEY",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ),
+)
+try:
+    COMMENT_KEY = bytes.fromhex(_RAW_COMMENT_KEY)
+except ValueError:
+    COMMENT_KEY = hashlib.sha256(_RAW_COMMENT_KEY.encode()).digest()
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -44,6 +58,38 @@ def log(msg):
         pass
 
 
+# --- Symmetric Encryption (Class 3 HW: AES-GCM for comments) ------------------
+ENC_PREFIX = "enc:v1:"
+
+
+def encrypt_comment(plaintext: str) -> str:
+    """Encrypt a plaintext comment with AES-GCM using a fresh 12-byte nonce."""
+    if plaintext is None or plaintext == "":
+        return ""
+    if plaintext.startswith(ENC_PREFIX):
+        return plaintext
+    nonce = os.urandom(12)  # new for every message
+    ct = AESGCM(COMMENT_KEY).encrypt(nonce, plaintext.encode("utf-8"), None)
+    blob = base64.b64encode(nonce + ct).decode("ascii")
+    return f"{ENC_PREFIX}{blob}"
+
+
+def decrypt_comment(stored: str) -> str:
+    """Decrypt an AES-GCM encrypted comment; fall back gracefully on legacy plaintext."""
+    if not stored:
+        return ""
+    payload = stored[len(ENC_PREFIX):] if stored.startswith(ENC_PREFIX) else stored
+    try:
+        raw = base64.b64decode(payload, validate=True)
+        if len(raw) < 12 + 16:
+            return stored
+        nonce, ct = raw[:12], raw[12:]
+        pt = AESGCM(COMMENT_KEY).decrypt(nonce, ct, None)
+        return pt.decode("utf-8")
+    except Exception:
+        return stored
+
+
 # --- Database -----------------------------------------------------------------
 def get_db():
     conn = psycopg2.connect(
@@ -52,6 +98,25 @@ def get_db():
     )
     conn.autocommit = True
     return conn
+
+
+def migrate_plaintext_comments():
+    """Ensure any unencrypted seed comments in the DB are encrypted at rest."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, comment FROM notes WHERE comment IS NOT NULL AND comment != ''")
+        rows = cur.fetchall()
+        for r in rows:
+            c = r["comment"]
+            if not c.startswith(ENC_PREFIX) and decrypt_comment(c) == c:
+                cur.execute(
+                    "UPDATE notes SET comment = %s WHERE id = %s",
+                    (encrypt_comment(c), r["id"]),
+                )
+        conn.close()
+    except Exception:
+        pass
 
 
 # --- Minimal JWT (deliberately weak) ------------------------------------------
@@ -122,8 +187,6 @@ def login_required(role=None):
     if role and session.get("role") != role:
         return False
     return True
-
-
 # --- Routes -------------------------------------------------------------------
 @app.route("/")
 def index():
@@ -185,6 +248,7 @@ def logout():
 def dashboard():
     if not login_required():
         return redirect(url_for("login"))
+    migrate_plaintext_comments()
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -195,6 +259,8 @@ def dashboard():
     )
     notes = cur.fetchall()
     conn.close()
+    for n in notes:
+        n["comment"] = decrypt_comment(n["comment"])
     return render_template("dashboard.html", notes=notes, token=session.get("token"))
 
 
@@ -203,6 +269,7 @@ def api_notes(note_id):
     ident = current_identity()
     if not ident:
         return jsonify({"error": "unauthorized"}), 401
+    migrate_plaintext_comments()
     conn = get_db()
     cur = conn.cursor()
     # Flaw #7 (IDOR): the owner of the note is never checked. Any authenticated
@@ -219,6 +286,7 @@ def api_notes(note_id):
     if not note:
         return jsonify({"error": "not found"}), 404
     note["grade"] = float(note["grade"]) if note["grade"] is not None else None
+    note["comment"] = decrypt_comment(note["comment"])
     return jsonify(note)
 
 
@@ -226,6 +294,7 @@ def api_notes(note_id):
 def teacher():
     if not login_required("teacher"):
         return redirect(url_for("login"))
+    migrate_plaintext_comments()
     conn = get_db()
     cur = conn.cursor()
     # A teacher sees every class (no owner scoping - broken access control).
@@ -238,6 +307,8 @@ def teacher():
         "JOIN classes c ON c.id = n.class_id ORDER BY c.name, u.username"
     )
     notes = cur.fetchall()
+    for n in notes:
+        n["comment"] = decrypt_comment(n["comment"])
     cur.execute("SELECT id, username FROM users WHERE role = 'student' ORDER BY username")
     students = cur.fetchall()
     conn.close()
@@ -254,18 +325,19 @@ def grades():
     class_id = request.form.get("class_id")
     grade = request.form.get("grade")
     comment = request.form.get("comment", "")
+    encrypted_comment = encrypt_comment(comment)
     conn = get_db()
     cur = conn.cursor()
     if note_id:
         cur.execute(
             "UPDATE notes SET grade = %s, comment = %s WHERE id = %s",
-            (grade, comment, note_id),
+            (grade, encrypted_comment, note_id),
         )
     else:
         cur.execute(
             "INSERT INTO notes (student_id, class_id, grade, comment) "
             "VALUES (%s, %s, %s, %s)",
-            (student_id, class_id, grade, comment),
+            (student_id, class_id, grade, encrypted_comment),
         )
     conn.close()
     log(f"grade write by {session.get('username')} note_id={note_id or 'new'}")
@@ -276,6 +348,7 @@ def grades():
 def export_csv():
     if not login_required("teacher"):
         return redirect(url_for("login"))
+    migrate_plaintext_comments()
     class_id = request.args.get("class_id")
     conn = get_db()
     cur = conn.cursor()
@@ -299,7 +372,7 @@ def export_csv():
     writer = csv.writer(buf)
     writer.writerow(["student", "class", "grade", "comment"])
     for r in rows:
-        writer.writerow([r["student"], r["class"], r["grade"], r["comment"]])
+        writer.writerow([r["student"], r["class"], r["grade"], decrypt_comment(r["comment"])])
     return Response(
         buf.getvalue(), mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=grades.csv"},
@@ -362,7 +435,7 @@ def _all_classes():
 @app.route("/admin/users", methods=["POST"])
 def admin_users():
     if not login_required("admin"):
-        return redirect(url_for("login"))
+        return redirect(url_for("admin"))
     action = request.form.get("action")
     conn = get_db()
     cur = conn.cursor()
@@ -390,5 +463,6 @@ def healthz():
 
 
 if __name__ == "__main__":
+    migrate_plaintext_comments()
     # Plain HTTP on purpose (flaw #3). Nginx + TLS is added in a later lab.
     app.run(host="0.0.0.0", port=5000, debug=True)
