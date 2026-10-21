@@ -25,7 +25,12 @@ services:
       POSTGRES_PASSWORD: notesapp_pg_pw_2024
       JWT_SECRET: s3cr3t
       SECRET_KEY: dev-session-key
-      COMMENT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      COMMENT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
+      HMAC_SECRET:
+        JWT_SECRET: s3cr3t
+        SECRET_KEY: dev-session-key
+        COMMENT_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        HMAC_SECRET: notesapp-csv-hmac-secret-key-2026
     ports:
       - "8080:5000"
     depends_on:

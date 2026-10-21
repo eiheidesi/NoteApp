@@ -29,6 +29,7 @@ DB_USER = os.environ.get("DB_USER", "notesapp")
 DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "notesapp_pg_pw_2024")
 JWT_SECRET = os.environ.get("JWT_SECRET", "s3cr3t")
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-session-key")
+HMAC_SECRET = os.environ.get("HMAC_SECRET", SECRET_KEY)
 
 # Class 3 HW: AES-GCM key (256-bit / 32 bytes) from environment
 _RAW_COMMENT_KEY = os.environ.get(
@@ -345,6 +346,30 @@ def grades():
 
 
 @app.route("/export.csv")
+def compute_csv_hmac(csv_body: str) -> str:
+    """Compute HMAC-SHA256 hex digest over the CSV content (Class 4 HW)."""
+    return hmac.new(
+        HMAC_SECRET.encode("utf-8"),
+        csv_body.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_signed_csv(content: str) -> bool:
+    """Verify a CSV file ending with '# HMAC: <digest>'."""
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return False
+    last_line = lines[-1].strip()
+    if not last_line.startswith("# HMAC:"):
+        return False
+    provided_mac = last_line.split("# HMAC:", 1)[1].strip()
+    body = "".join(lines[:-1])
+    expected_mac = compute_csv_hmac(body)
+    return hmac.compare_digest(provided_mac, expected_mac)
+
+
+@app.route("/export.csv")
 def export_csv():
     if not login_required("teacher"):
         return redirect(url_for("login"))
@@ -373,10 +398,28 @@ def export_csv():
     writer.writerow(["student", "class", "grade", "comment"])
     for r in rows:
         writer.writerow([r["student"], r["class"], r["grade"], decrypt_comment(r["comment"])])
+    csv_body = buf.getvalue()
+    mac = compute_csv_hmac(csv_body)
+    signed_csv = f"{csv_body}# HMAC: {mac}\n"
     return Response(
-        buf.getvalue(), mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=grades.csv"},
+        signed_csv, mimetype="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=grades_export.csv",
+            "X-CSV-HMAC": mac,
+        },
     )
+
+
+@app.route("/verify.csv", methods=["POST"])
+def verify_csv_route():
+    """Verify an uploaded or raw CSV body against its trailing HMAC line."""
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="replace")
+    else:
+        content = request.get_data(as_text=True)
+    if verify_signed_csv(content):
+        return jsonify({"valid": True, "status": "OK"}), 200
+    return jsonify({"valid": False, "status": "CHECK FAILED"}), 400
 
 
 @app.route("/admin")
