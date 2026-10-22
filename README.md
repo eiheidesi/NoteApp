@@ -4,6 +4,9 @@ A small grades application used throughout the Computer Security course. Teacher
 record grades and comments for their classes, students read their own grades, and an
 admin manages users and classes.
 
+**Author:** Ziqian YU (Student ID: 2023902046)  
+**Course:** Computer Security (EPITA)
+
 ## Run it
 
 You need Docker with the Compose plugin.
