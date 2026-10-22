@@ -16,6 +16,8 @@ import subprocess
 import psycopg2
 import psycopg2.extras
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyError, InvalidHashError
 from flask import (
     Flask, request, session, redirect, url_for,
     render_template, Response, jsonify, abort,
@@ -45,6 +47,7 @@ except ValueError:
     COMMENT_KEY = hashlib.sha256(_RAW_COMMENT_KEY.encode()).digest()
 
 app = Flask(__name__)
+ph = PasswordHasher()
 app.secret_key = SECRET_KEY
 
 LOG_FILE = os.environ.get("NOTESAPP_LOG", "/var/log/notesapp/app.log")
@@ -208,18 +211,34 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "")
         password = request.form.get("password", "")
-        # Flaw #8: SQL injection. Query built by string concatenation, no params.
-        query = (
-            "SELECT id, username, role FROM users "
-            "WHERE username = '" + username + "' AND password = '" + password + "'"
-        )
         conn = get_db()
         cur = conn.cursor()
+        row = None
         try:
-            cur.execute(query)
-            row = cur.fetchone()
+            cur.execute(
+                "SELECT id, username, password, role FROM users WHERE username = %s",
+                (username,),
+            )
+            user = cur.fetchone()
+            if user:
+                stored_pw = user["password"] or ""
+                if stored_pw.startswith("$argon2"):
+                    try:
+                        if ph.verify(stored_pw, password):
+                            row = user
+                    except (VerifyError, InvalidHashError):
+                        row = None
+                else:
+                    md5_pw = hashlib.md5(password.encode()).hexdigest()
+                    if stored_pw == password or stored_pw == md5_pw:
+                        row = user
+                        # Migrate user password to Argon2id on successful login
+                        new_hash = ph.hash(password)
+                        cur.execute(
+                            "UPDATE users SET password = %s WHERE id = %s",
+                            (new_hash, user["id"]),
+                        )
         except Exception as e:
-            # Keep the raw error visible - helps the SQLi session.
             error = f"Query error: {e}"
             row = None
         conn.close()
@@ -227,7 +246,6 @@ def login():
             session["user_id"] = row["id"]
             session["username"] = row["username"]
             session["role"] = row["role"]
-            # Issue a weak JWT the dashboard uses to call the API.
             session["token"] = make_jwt({
                 "user_id": row["id"], "username": row["username"], "role": row["role"],
             })
