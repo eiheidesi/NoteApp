@@ -29,7 +29,15 @@ DB_HOST = os.environ.get("DB_HOST", "db")
 DB_NAME = os.environ.get("DB_NAME", "notesapp")
 DB_USER = os.environ.get("DB_USER", "notesapp")
 DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "notesapp_pg_pw_2024")
-JWT_SECRET = os.environ.get("JWT_SECRET", "s3cr3t")
+# The signing key is never stored in the repository: it comes from .env.
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET is not set. Copy .env.example to .env and fill in a "
+        "fresh 256-bit secret (openssl rand -hex 32)."
+    )
+if len(JWT_SECRET.encode("utf-8")) < 32:
+    raise RuntimeError("JWT_SECRET must be at least 32 bytes (256 bits).")
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-session-key")
 HMAC_SECRET = os.environ.get("HMAC_SECRET", SECRET_KEY)
 
@@ -142,33 +150,40 @@ def make_jwt(payload: dict) -> str:
     return f"{h}.{p}.{_b64url(sig)}"
 
 
-def verify_jwt(token: str):
-    """Decode a JWT. Accepts alg:none (no signature) and HS256 with a short key.
+# Allowed algorithm whitelist (strictly pinned, accept HS256 only)
+ALLOWED_JWT_ALGS = ("HS256",)
 
-    This is intentionally broken (flaw #4): an attacker can forge any identity
-    by setting "alg":"none", and the HS256 key is trivially guessable.
-    """
+def verify_jwt(token: str):
+    """Verify a JWT strictly: reject 'none', pin algorithm to HS256, verify HMAC."""
     try:
         h_b64, p_b64, sig_b64 = token.split(".")
     except ValueError:
         return None
+    
+    # Defense 1: Reject tokens with an empty signature
+    if not sig_b64:
+        return None
+        
     try:
         header = json.loads(_b64url_decode(h_b64))
         payload = json.loads(_b64url_decode(p_b64))
     except Exception:
         return None
 
-    alg = header.get("alg", "").lower()
-    if alg == "none":
-        # No signature verification at all.
-        return payload
-    if alg == "hs256":
-        signing_input = f"{h_b64}.{p_b64}".encode()
-        expected = _b64url(hmac.new(JWT_SECRET.encode(), signing_input, hashlib.sha256).digest())
-        if hmac.compare_digest(expected, sig_b64):
-            return payload
+    # Defense 2: Reject "none" and strictly pin algorithm whitelist (The ticket gets no vote)
+    alg = header.get("alg", "")
+    if not isinstance(alg, str) or alg.upper() == "NONE" or alg not in ALLOWED_JWT_ALGS:
         return None
-    return None
+
+    # Defense 3: Perform strict HMAC signature verification using a long random secret
+    signing_input = f"{h_b64}.{p_b64}".encode()
+    expected = _b64url(
+        hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    )
+    if not hmac.compare_digest(expected, sig_b64):
+        return None
+        
+    return payload
 
 
 def current_identity():

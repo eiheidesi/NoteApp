@@ -9,7 +9,9 @@ __pycache__/
 venv/
 .venv/
 
-# Local env overrides
+# Local env overrides (never commit real secrets)
 .env
 .env.local
+.env.*
+!.env.example
 .DS_Store

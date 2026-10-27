@@ -14,6 +14,9 @@ You need Docker with the Compose plugin.
 ```
 git clone git@github.com:KristenPire/NoteApp.git notesapp
 cd notesapp
+cp .env.example .env
+# generate a fresh 256-bit JWT secret; .env is gitignored and never committed
+printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
 docker compose up
 ```
 
