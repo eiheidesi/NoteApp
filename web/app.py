@@ -319,6 +319,12 @@ def api_notes(note_id):
     conn.close()
     if not note:
         return jsonify({"error": "not found"}), 404
+
+    # Flaw #7 fix: you may only read your OWN note. Teachers and admins may
+    # read any note; a student may not read another student's note.
+    if note["student_id"] != ident["user_id"] and ident.get("role") not in ("teacher", "admin"):
+        return jsonify({"error": "not found"}), 404
+
     note["grade"] = float(note["grade"]) if note["grade"] is not None else None
     note["comment"] = decrypt_comment(note["comment"])
     return jsonify(note)
