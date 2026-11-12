@@ -17,7 +17,7 @@ import psycopg2
 import psycopg2.extras
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyError, InvalidHashError
+from argon2.exceptions import VerificationError, InvalidHashError
 from flask import (
     Flask, request, session, redirect, url_for,
     render_template, Response, jsonify, abort,
@@ -241,7 +241,7 @@ def login():
                     try:
                         if ph.verify(stored_pw, password):
                             row = user
-                    except (VerifyError, InvalidHashError):
+                    except (VerificationError, InvalidHashError):
                         row = None
                 else:
                     md5_pw = hashlib.md5(password.encode()).hexdigest()
