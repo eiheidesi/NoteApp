@@ -4,6 +4,7 @@ Deliberately insecure teaching app for the EPITA Computer Security course.
 Do not deploy this anywhere real.
 """
 import os
+import re
 import csv
 import io
 import json
@@ -481,12 +482,16 @@ def admin_ping():
     # Flaw #11: no CSRF token. Flaw #9: command injection via os/system shell.
     if not login_required("admin"):
         return redirect(url_for("login"))
-    host = request.form.get("host", "")
+    host = request.form.get("host", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9.\-]+", host):
+        output = "Invalid host: use a plain hostname or IP address."
+        return render_template("admin.html", users=_all_users(), classes=_all_classes(),
+                            ping_result=output)
     # Host is concatenated straight into a shell command.
-    cmd = "ping -c 1 " + host
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=10,
+            ["ping", "-c", "1", host],
+            capture_output=True, text=True, timeout=10,
         )
         output = result.stdout + result.stderr
     except Exception as e:
